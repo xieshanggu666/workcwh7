@@ -88,12 +88,18 @@ window.WarningsView = {
               <thead><tr><th>等级</th><th>目标</th><th>触发值</th><th>处置单</th><th>时间</th></tr></thead>
               <tbody>
                 <tr v-for="w in warnings" :key="w.id">
-                  <td><span class="badge" :class="fmt.lvBadge(w.level)">{{ fmt.lvName(w.level) }}</span></td>
+                  <td>
+                    <span class="badge" :class="w.kind==='water_supply' ? 'cyan' : fmt.lvBadge(w.level)">
+                      {{ w.kind === 'water_supply' ? '供水' : '' }}{{ fmt.lvName(w.level) }}
+                    </span>
+                  </td>
                   <td>{{ w.target_name }}</td>
                   <td class="num mono">{{ fmt.num(w.value,1) }} / {{ fmt.num(w.threshold,1) }}</td>
                   <td>
                     <span v-if="w.disposal_id" class="badge blue" style="cursor:pointer"
-                          @click="$root.view='disposal'">#{{ w.disposal_id }}</span>
+                          @click="$root.view='disposal'">处置#{{ w.disposal_id }}</span>
+                    <span v-else-if="w.water_supply_plan_id" class="badge cyan" style="cursor:pointer"
+                          @click="$root.view='watersupply'">供水#{{ w.water_supply_plan_id }}</span>
                     <span v-else class="badge gray">历史</span>
                   </td>
                   <td style="font-size:11.5px;color:#7d95b4">{{ fmt.time(w.created_at) }}</td>

@@ -84,6 +84,8 @@ class Reservoir(Base):
     gate_max = Column(Float, default=0.0)            # 闸门最大泄流 m³/s
     current_level = Column(Float, default=0.0)
     current_storage = Column(Float, default=0.0)
+    dead_level = Column(Float, default=0.0)          # 死水位 m（供水极限，低于此水位不得再放水）
+    drought_warn_level = Column(Float, default=0.0)  # 枯水预警水位 m（0 时按死水位/正常蓄水位推算）
     active = Column(Integer, default=1)
     x = Column(Float, default=0)
     y = Column(Float, default=0)
@@ -245,10 +247,11 @@ class WarningRecord(Base):
     id = Column(Integer, primary_key=True)
     run_id = Column(Integer, nullable=True)               # 关联预报运行；历史记录为 NULL
     disposal_id = Column(Integer, nullable=True)          # 处置单审核回写关联；历史记录为 NULL
+    water_supply_plan_id = Column(Integer, nullable=True)  # 枯水期供水保障单关联
     target_type = Column(String(24), default="station")   # station/reservoir/zone
     target_id = Column(Integer, default=0)
     target_name = Column(String(64), default="")
-    kind = Column(String(24), default="water_level")      # water_level/flow/rain
+    kind = Column(String(24), default="water_level")      # water_level/flow/rain/water_supply
     level = Column(String(16), default="blue")            # blue/yellow/orange/red
     value = Column(Float, default=0.0)
     threshold = Column(Float, default=0.0)
@@ -384,4 +387,125 @@ class SupplyAllocation(Base):
     issued_quantity = Column(Integer, default=0)      # 调度令确认时已出库数量（重复确认只出增量）
     note = Column(String(200), default="")
     created_by = Column(String(64), default="")       # 分配：物资管理员
+    created_at = Column(DateTime, default=datetime.now)
+
+
+# ---------------- 枯水期供水保障 ----------------
+class Township(Base):
+    """受水乡镇（供水保障对象；联系人作为乡镇确认/执行环节的电子签名岗位）"""
+    __tablename__ = "townships"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(64), nullable=False)
+    contact = Column(String(64), default="")          # 乡镇水务联系人
+    demand_m3 = Column(Integer, default=0)            # 枯水期日均需水 m³/日（申报参考）
+    active = Column(Integer, default=1)
+    x = Column(Float, default=0)
+    y = Column(Float, default=0)
+
+
+class WaterSupplyPlan(Base):
+    """枯水期供水保障单：水库管理员提交计划 → 调度员审核 → 乡镇确认优先级
+    → 乡镇执行配水 → 完成后扣减库容并回写水库调度与预警。
+
+    同一水库至多一张未闭环（submitted/reviewed/executing）供水保障单；
+    异常欠供（实际供水 < 计划水量）时由物资管理员追加应急物资
+    (WaterSupplyEmergency)，应急出库复用应急物资库存池，并可挂接原有
+    防汛处置单（disposal_id）兼容既有处置记录。
+    状态机：submitted（待审核）→ reviewed（已审核，待乡镇确认优先级）
+    → executing（执行配水中）→ completed（已完成，库容已扣减）。
+    """
+    __tablename__ = "water_supply_plans"
+
+    id = Column(Integer, primary_key=True)
+    reservoir_id = Column(Integer, nullable=False)
+    title = Column(String(128), nullable=False)
+    reason = Column(String(200), default="")          # 枯水期供水事由
+    period_days = Column(Integer, default=1)          # 计划供水周期（日）
+    status = Column(String(16), default="submitted")  # submitted/reviewed/executing/completed
+    plan_snapshot = Column(JSON, default=dict)        # 申报快照（申报时水库工况/总计划水量）
+    completion_snapshot = Column(JSON, default=dict)  # 完成快照（实际供水/欠供/扣减后工况/预警联动）
+    remark = Column(Text, default="")
+
+    submitted_by = Column(String(64), default="")     # 计划：水库管理员
+    reviewed_by = Column(String(64), default="")      # 审核：调度员
+    priority_by = Column(String(64), default="")      # 优先级确认：乡镇（乡镇联系人岗位）
+    executed_by = Column(String(64), default="")      # 执行配水：乡镇
+    completed_by = Column(String(64), default="")     # 完成：乡镇
+
+    submitted_at = Column(DateTime, default=datetime.now)
+    reviewed_at = Column(DateTime, nullable=True)
+    priority_at = Column(DateTime, nullable=True)
+    executed_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class WaterSupplyAllocation(Base):
+    """配水明细：供水保障单 × 乡镇（同一单同一乡镇至多一条）。
+
+    priority 由乡镇在审核通过后确认（1 最高）；priority_confirmed 标记
+    该乡镇是否已完成优先级确认（乡镇确认后才允许执行配水）。
+    delivered_m3 为执行期实际上报的供水量，完成时据此结算欠供。
+    """
+    __tablename__ = "water_supply_allocations"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "township_id", name="uq_water_supply_alloc"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    plan_id = Column(Integer, nullable=False)
+    township_id = Column(Integer, nullable=False)
+    township_name = Column(String(64), default="")    # 冗余，乡镇删除后仍可展示
+    planned_m3 = Column(Float, default=0.0)           # 计划配水量 m³
+    delivered_m3 = Column(Float, nullable=True)       # 实际供水量 m³（执行期上报；完成时结算）
+    priority = Column(Integer, default=0)             # 供水优先级：1 最高，0 未确认
+    priority_note = Column(String(200), default="")
+    priority_confirmed = Column(Integer, default=0)
+    created_by = Column(String(64), default="")       # 申报：水库管理员
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class WaterSupplyEmergency(Base):
+    """异常欠供应急物资追加记录：实际供水不足时由物资管理员追加应急物资。
+
+    出库直接扣减应急物资库存（supplies.stock，与防汛处置共用库存池），
+    记录投向乡镇与欠供水量；可携带 disposal_id 挂接原有防汛处置单，
+    挂接时在该处置单处置记录追加一行，不改动其状态机，兼容原有处置记录。
+    """
+    __tablename__ = "water_supply_emergencies"
+
+    id = Column(Integer, primary_key=True)
+    plan_id = Column(Integer, nullable=False)
+    supply_id = Column(Integer, nullable=False)
+    township_id = Column(Integer, nullable=True)      # 空 = 供水单公用应急物资
+    shortage_m3 = Column(Float, default=0.0)          # 追加时认定的欠供水量 m³
+    quantity = Column(Integer, default=0)             # 追加数量（物资单位）
+    disposal_id = Column(Integer, nullable=True)      # 挂接原有防汛处置单（兼容）
+    note = Column(String(200), default="")
+    created_by = Column(String(64), default="")       # 追加：物资管理员
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class ReservoirDispatchLog(Base):
+    """水库调度记录（回写台账）：供水保障完成放水扣减库容时追加一条。
+
+    与防汛调度方案 (OperationPlan) 并存，分别记录防洪与供水两类调度运用，
+    kind=water_supply / flood_control；payload 存档当时水位/库容变化与
+    关联单据快照，供调度台账与流域总览展示。
+    """
+    __tablename__ = "reservoir_dispatch_logs"
+
+    id = Column(Integer, primary_key=True)
+    reservoir_id = Column(Integer, nullable=False)
+    kind = Column(String(24), default="water_supply")  # water_supply / flood_control
+    ref_id = Column(Integer, nullable=True)            # 关联单据 id（供水保障单/处置单）
+    title = Column(String(128), default="")
+    released_m3 = Column(Float, default=0.0)           # 本次放水量 m³
+    level_before = Column(Float, default=0.0)
+    level_after = Column(Float, default=0.0)
+    storage_before = Column(Float, default=0.0)        # 万m³
+    storage_after = Column(Float, default=0.0)         # 万m³
+    payload = Column(JSON, default=dict)
+    created_by = Column(String(64), default="")
     created_at = Column(DateTime, default=datetime.now)

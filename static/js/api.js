@@ -54,6 +54,19 @@ const API = {
   assignSupply: (id, body) => API.post(`/api/disposals/${id}/supply-allocations`, body),
   releaseSupply: (id, aid, role) => API.del(`/api/disposals/${id}/supply-allocations/${aid}`, { role }),
   confirmResources: (id, body) => API.post(`/api/disposals/${id}/confirm-resources`, body),
+  // 枯水期供水保障
+  townships: () => API.get("/api/townships"),
+  reservoirsDrought: () => API.get("/api/reservoirs"),
+  dispatchLogs: (reservoirId) => API.get(`/api/reservoir-dispatch-logs${reservoirId ? `?reservoir_id=${reservoirId}` : ""}`),
+  waterSupplyPlans: () => API.get("/api/water-supply"),
+  waterSupplyPlan: (id) => API.get(`/api/water-supply/${id}`),
+  submitWaterSupply: (body) => API.post("/api/water-supply", body),
+  reviewWaterSupply: (id, body) => API.post(`/api/water-supply/${id}/review`, body),
+  setWaterPriority: (id, body) => API.post(`/api/water-supply/${id}/priority`, body),
+  confirmWaterPriorities: (id, body) => API.post(`/api/water-supply/${id}/confirm-priorities`, body),
+  reportWaterDelivery: (id, body) => API.post(`/api/water-supply/${id}/delivery`, body),
+  addWaterEmergency: (id, body) => API.post(`/api/water-supply/${id}/emergency`, body),
+  completeWaterSupply: (id, body) => API.post(`/api/water-supply/${id}/complete`, body),
 };
 
 /* 全局运行状态：跨视图共享最近一次预报结果 / 运行记录 */

@@ -59,6 +59,8 @@ window.MonitorView = {
       <div class="stat green"><div class="k">水库</div><div class="v">{{ ov.reservoirs }}<small>座</small></div></div>
       <div class="stat amber"><div class="k">总防洪库容</div><div class="v">{{ fmt.num(ov.total_capacity, 0) }}<small>万m³</small></div></div>
       <div class="stat red"><div class="k">风险区人口</div><div class="v">{{ fmt.num(ov.population_at_risk, 0) }}<small>人</small></div></div>
+      <div class="stat" :class="ov.drought_reservoirs ? 'red' : ''"><div class="k">枯水预警水库</div><div class="v">{{ ov.drought_reservoirs || 0 }}<small>座</small></div></div>
+      <div class="stat amber"><div class="k">进行中供水保障</div><div class="v">{{ ov.active_water_supply_plans || 0 }}<small>张</small></div></div>
       <div class="stat"><div class="k">可用降雨情景</div><div class="v">{{ ov.events }}<small>场</small></div></div>
     </div>
 
@@ -69,9 +71,14 @@ window.MonitorView = {
           <div class="panel-body">
             <div style="display:flex;gap:26px;flex-wrap:wrap">
               <div v-for="r in resList" :key="r.id" style="display:flex;gap:10px;align-items:flex-end;flex-direction:column">
-                <div style="font-size:12px">{{ r.name }}</div>
+                <div style="font-size:12px">
+                  {{ r.name }}
+                  <span v-if="r.drought_level" class="badge" style="margin-left:4px"
+                        :class="{blue:r.drought_level==='blue',yellow:r.drought_level==='yellow',orange:r.drought_level==='orange',red:r.drought_level==='red'}">枯水</span>
+                </div>
                 <div class="level-bar" style="height:160px">
                   <div class="fill" :style="{height: pct(r.current_level, r.crest_level) + '%', background: resColor(r)}"></div>
+                  <div class="mark" :style="{bottom: pct(r.dead_level, r.crest_level) + '%', color:'#7dd3fc'}">死水位{{ fmt.num(r.dead_level,0) }}</div>
                   <div class="mark" :style="{bottom: pct(r.flood_level, r.crest_level) + '%', color:'#f5b83d'}">汛限{{ fmt.num(r.flood_level,0) }}</div>
                   <div class="mark" :style="{bottom: pct(r.crest_level, r.crest_level) + '%', color:'#ff5c6c'}">防洪{{ fmt.num(r.crest_level,0) }}</div>
                 </div>

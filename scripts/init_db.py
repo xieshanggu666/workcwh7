@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.core.database import Base, engine, SessionLocal
 from app.models import (FloodZone, RainStation, RainfallEvent, Reservoir, RiverNode,
-                        RiverReach, Shelter, SubBasin, Supply, Vehicle, WaterStation)
+                        RiverReach, Shelter, SubBasin, Supply, Township, Vehicle,
+                        WaterStation)
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "flood.db")
 
@@ -97,14 +98,28 @@ def main():
                   storage_curve=[[60, 3000], [70, 6200], [80, 11000], [90, 17200], [100, 24000], [110, 30000]],
                   discharge_curve=[[80, 0], [85, 600], [90, 1600], [95, 3200], [100, 5000], [105, 7200]],
                   gate_max=2500.0, current_level=qing_start,
+                  dead_level=62.0, drought_warn_level=70.0,
                   current_storage=None, active=1, x=150, y=360),
         Reservoir(id=2, name="龙潭水库", node_id=6, normal_level=9.0, flood_level=12.0,
                   crest_level=21.0,
                   storage_curve=[[5, 800], [10, 2400], [15, 5200], [20, 9200], [25, 14000]],
                   discharge_curve=[[12, 0], [16, 1200], [18, 2600], [21, 4600]],
-                  gate_max=3200.0, current_level=11.0, active=1, x=520, y=430),
+                  gate_max=3200.0, current_level=11.0,
+                  dead_level=6.0, drought_warn_level=8.0,
+                  active=1, x=520, y=430),
     ]
     db.add_all(reservoirs)
+
+    # ---------- 受水乡镇（枯水期供水保障对象）----------
+    townships = [
+        Township(id=1, name="白水渡镇", contact="刘水务 139-1001", demand_m3=1200,
+                 x=330, y=440),
+        Township(id=2, name="青源乡", contact="陈水务 139-1002", demand_m3=650,
+                 x=180, y=300),
+        Township(id=3, name="龙潭镇", contact="赵水务 139-1003", demand_m3=900,
+                 x=520, y=470),
+    ]
+    db.add_all(townships)
 
     # ---------- 淹没风险区 ----------
     zones = [
@@ -173,7 +188,7 @@ def main():
 
     db.commit()
     db.close()
-    print("数据库初始化完成：青岚江流域（4子流域、2水库调度、3降雨情景、2风险区、3避难点、7车辆、5类物资）")
+    print("数据库初始化完成：青岚江流域（4子流域、2水库调度、3降雨情景、2风险区、3避难点、7车辆、5类物资、3受水乡镇）")
 
 
 if __name__ == "__main__":

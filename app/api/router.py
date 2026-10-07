@@ -5,9 +5,11 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models import (DisposalOrder, EvacuationRecord, FloodZone, ForecastRun,
                         ForecastSeries, RainStation, RainfallEvent, Reservoir,
-                        RiverNode, RiverReach, SubBasin, WaterStation, WarningRecord)
+                        RiverNode, RiverReach, SubBasin, WaterStation,
+                        WaterSupplyPlan, WarningRecord)
 from app.services import disposal as disposal_svc
 from app.services import resources as resource_svc
+from app.services import water_supply as ws_svc
 from app.services.forecast import run_forecast
 
 router = APIRouter(prefix="/api")
@@ -84,6 +86,65 @@ class ResourceConfirmBody(BaseModel):
     order_text: str = ""
 
 
+# ---------------- 枯水期供水保障请求体 ----------------
+class WaterSupplyAllocationItem(BaseModel):
+    township_id: int
+    planned_m3: float
+
+
+class WaterSupplySubmitBody(BaseModel):
+    reservoir_id: int
+    period_days: int = 1
+    title: str = ""
+    reason: str = ""
+    remark: str = ""
+    allocations: list[WaterSupplyAllocationItem]
+    operator: str = ""
+    role: str = "manager"              # manager 水库管理员提交计划
+
+
+class WaterSupplyReviewBody(BaseModel):
+    operator: str = ""
+    role: str = "dispatcher"           # dispatcher 调度员审核
+    opinion: str = ""
+
+
+class WaterSupplyPriorityBody(BaseModel):
+    township_id: int
+    priority: int                      # 1 最高
+    note: str = ""
+    role: str = "township"             # township 乡镇确认优先级
+
+
+class WaterSupplyPrioritiesConfirmBody(BaseModel):
+    operator: str = ""
+    role: str = "township"             # 乡镇确认全部优先级并启动配水
+    note: str = ""
+
+
+class WaterSupplyDeliveryBody(BaseModel):
+    township_id: int
+    delivered_m3: float
+    role: str = "township"             # 乡镇执行上报实际供水
+
+
+class WaterSupplyEmergencyBody(BaseModel):
+    supply_id: int
+    quantity: int
+    shortage_m3: float | None = None   # 兼容入参（以服务端实欠供为准）
+    township_id: int | None = None
+    disposal_id: int | None = None     # 挂接原有防汛处置单（兼容处置记录）
+    note: str = ""
+    operator: str = ""
+    role: str = "supply_manager"       # 物资管理员追加应急物资
+
+
+class WaterSupplyCompleteBody(BaseModel):
+    operator: str = ""
+    role: str = "township"
+    summary: str = ""
+
+
 @router.get("/overview")
 def overview(db: Session = Depends(get_db)):
     res = db.query(Reservoir).all()
@@ -91,6 +152,9 @@ def overview(db: Session = Depends(get_db)):
     events = db.query(RainfallEvent).all()
     subs = db.query(SubBasin).all()
     zones = db.query(FloodZone).all()
+    drought_res = sum(1 for r in res if ws_svc.drought_level(r))
+    active_ws = db.query(WaterSupplyPlan).filter(
+        WaterSupplyPlan.status.in_(("submitted", "reviewed", "executing"))).count()
     return {
         "basin_name": "青岚江流域",
         "sub_basins": len(subs),
@@ -103,6 +167,8 @@ def overview(db: Session = Depends(get_db)):
         "reservoir_ready": sum(1 for r in res if r.current_level),
         "total_capacity": round(sum(r.storage_at(r.crest_level) for r in res), 1),
         "population_at_risk": sum(z.population for z in zones),
+        "drought_reservoirs": drought_res,
+        "active_water_supply_plans": active_ws,
     }
 
 
@@ -120,6 +186,9 @@ def basin_map(db: Session = Depends(get_db)):
                    "normal_level": r.normal_level, "flood_level": r.flood_level,
                    "crest_level": r.crest_level, "current_level": r.current_level,
                    "current_storage": r.current_storage,
+                   "dead_level": r.dead_level or 0.0,
+                   "drought_warn_level": ws_svc.effective_drought_warn_level(r),
+                   "drought_level": ws_svc.drought_level(r),
                    "gate_max": r.gate_max, "x": r.x, "y": r.y}
                   for r in db.query(Reservoir).all()]
     stations = [{"id": s.id, "name": s.name, "node_id": s.node_id, "x": s.x, "y": s.y,
@@ -157,17 +226,20 @@ def reservoirs(db: Session = Depends(get_db)):
     return [{"id": r.id, "name": r.name, "node_id": r.node_id,
              "normal_level": r.normal_level, "flood_level": r.flood_level,
              "crest_level": r.crest_level, "current_level": r.current_level,
-             "current_storage": r.current_storage, "gate_max": r.gate_max}
+             "current_storage": r.current_storage, "gate_max": r.gate_max,
+             **ws_svc.reservoir_drought_brief(db, r)}
             for r in db.query(Reservoir).all()]
 
 
 @router.get("/warnings")
 def warnings(db: Session = Depends(get_db)):
     return [{"id": w.id, "run_id": w.run_id, "disposal_id": w.disposal_id,
+             "water_supply_plan_id": w.water_supply_plan_id,
              "target_type": w.target_type,
              "target_id": w.target_id,
              "target_name": w.target_name, "level": w.level, "value": w.value,
-             "threshold": w.threshold, "message": w.message,
+             "threshold": w.threshold, "kind": w.kind,
+             "message": w.message,
              "created_at": w.created_at.isoformat() if w.created_at else None,
              "status": w.status}
             for w in db.query(WarningRecord).order_by(WarningRecord.id.desc()).all()]
@@ -323,3 +395,76 @@ def resources_confirm(order_id: int, body: ResourceConfirmBody, db: Session = De
     """指挥员确认资源调度令：容量/运力覆盖校验、物资出库、回写转移进度与风险预警。"""
     return resource_svc.confirm_resources(db, order_id, body.operator, body.role,
                                           body.order_text)
+
+
+# ---------------- 枯水期供水保障 ----------------
+@router.get("/townships")
+def townships(db: Session = Depends(get_db)):
+    """受水乡镇台账。"""
+    return ws_svc.list_townships(db)
+
+
+@router.get("/reservoir-dispatch-logs")
+def reservoir_dispatch_logs(reservoir_id: int | None = None, db: Session = Depends(get_db)):
+    """水库调度记录（供水放水与防洪调度并存）。"""
+    return ws_svc.list_dispatch_logs(db, reservoir_id)
+
+
+@router.get("/water-supply")
+def water_supply_list(db: Session = Depends(get_db)):
+    return ws_svc.list_plans(db)
+
+
+@router.get("/water-supply/{plan_id}")
+def water_supply_detail(plan_id: int, db: Session = Depends(get_db)):
+    return ws_svc.get_plan(db, plan_id)
+
+
+@router.post("/water-supply")
+def water_supply_submit(body: WaterSupplySubmitBody, db: Session = Depends(get_db)):
+    """水库管理员提交枯水期供水保障计划（分乡镇配水，死水位可用水量校验）。"""
+    return ws_svc.submit_plan(db, body.model_dump())
+
+
+@router.post("/water-supply/{plan_id}/review")
+def water_supply_review(plan_id: int, body: WaterSupplyReviewBody,
+                        db: Session = Depends(get_db)):
+    """调度员审核：复核可放水量并登记枯水/供水预警。"""
+    return ws_svc.review_plan(db, plan_id, body.operator, body.role, body.opinion)
+
+
+@router.post("/water-supply/{plan_id}/priority")
+def water_supply_priority(plan_id: int, body: WaterSupplyPriorityBody,
+                          db: Session = Depends(get_db)):
+    """乡镇确认所辖配水条目的供水优先级。"""
+    return ws_svc.set_priority(db, plan_id, body.model_dump())
+
+
+@router.post("/water-supply/{plan_id}/confirm-priorities")
+def water_supply_confirm_priorities(plan_id: int, body: WaterSupplyPrioritiesConfirmBody,
+                                    db: Session = Depends(get_db)):
+    """乡镇确认全部优先级并启动执行配水（预警进入处置中）。"""
+    return ws_svc.confirm_priorities(db, plan_id, body.operator, body.role, body.note)
+
+
+@router.post("/water-supply/{plan_id}/delivery")
+def water_supply_delivery(plan_id: int, body: WaterSupplyDeliveryBody,
+                          db: Session = Depends(get_db)):
+    """乡镇执行期上报实际供水量（缺口计为欠供）。"""
+    return ws_svc.report_delivery(db, plan_id, body.model_dump())
+
+
+@router.post("/water-supply/{plan_id}/emergency")
+def water_supply_emergency(plan_id: int, body: WaterSupplyEmergencyBody,
+                           db: Session = Depends(get_db)):
+    """异常欠供：物资管理员追加应急物资（直接出库，可挂接原有处置单）。"""
+    data = body.model_dump()
+    data.pop("shortage_m3", None)  # 欠供以服务端按实际上报结算为准
+    return ws_svc.add_emergency(db, plan_id, data)
+
+
+@router.post("/water-supply/{plan_id}/complete")
+def water_supply_complete(plan_id: int, body: WaterSupplyCompleteBody,
+                          db: Session = Depends(get_db)):
+    """乡镇完成：扣减库容、回写水库调度记录、升级/核销枯水预警。"""
+    return ws_svc.complete_plan(db, plan_id, body.operator, body.role, body.summary)
