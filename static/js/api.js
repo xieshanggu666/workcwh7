@@ -54,6 +54,14 @@ const API = {
   assignSupply: (id, body) => API.post(`/api/disposals/${id}/supply-allocations`, body),
   releaseSupply: (id, aid, role) => API.del(`/api/disposals/${id}/supply-allocations/${aid}`, { role }),
   confirmResources: (id, body) => API.post(`/api/disposals/${id}/confirm-resources`, body),
+  // 枯水期供水保障
+  supplyPlans: () => API.get("/api/supply-plans"),
+  supplyPlan: (id) => API.get(`/api/supply-plans/${id}`),
+  applySupplyPlan: (body) => API.post("/api/supply-plans", body),
+  reviewSupplyPlan: (id, body) => API.post(`/api/supply-plans/${id}/review`, body),
+  executeSupplyPlan: (id, body) => API.post(`/api/supply-plans/${id}/execute`, body),
+  completeSupplyPlan: (id, body) => API.post(`/api/supply-plans/${id}/complete`, body),
+  appendSupplyEmergency: (id, body) => API.post(`/api/supply-plans/${id}/emergency-supplies`, body),
 };
 
 /* 全局运行状态：跨视图共享最近一次预报结果 / 运行记录 */

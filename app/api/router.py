@@ -8,6 +8,7 @@ from app.models import (DisposalOrder, EvacuationRecord, FloodZone, ForecastRun,
                         RiverNode, RiverReach, SubBasin, WaterStation, WarningRecord)
 from app.services import disposal as disposal_svc
 from app.services import resources as resource_svc
+from app.services import watersupply as supply_svc
 from app.services.forecast import run_forecast
 
 router = APIRouter(prefix="/api")
@@ -84,6 +85,45 @@ class ResourceConfirmBody(BaseModel):
     order_text: str = ""
 
 
+# ---------------- 枯水期供水保障请求体 ----------------
+class SupplyApplyBody(BaseModel):
+    reservoir_id: int
+    operator: str = ""
+    role: str = "reservoir_manager"    # reservoir_manager 水库管理员
+    title: str = ""
+    period: str = ""                   # 供水期（如 2026-01~2026-03）
+    items: list[dict] = []             # [{township, demand}, ...] 乡镇需水明细
+    remark: str = ""
+
+
+class SupplyReviewBody(BaseModel):
+    operator: str = ""
+    role: str = "dispatcher"           # dispatcher 调度员
+    opinion: str = ""
+
+
+class SupplyExecuteBody(BaseModel):
+    operator: str = ""
+    role: str = "township"             # township 乡镇联络员
+    priorities: dict = {}              # {明细id: 优先级} 1 最高
+    note: str = ""
+
+
+class SupplyCompleteBody(BaseModel):
+    operator: str = ""
+    role: str = "township"
+    actuals: dict = {}                 # {明细id: 实际供水量}，缺省按计划分配足额
+    summary: str = ""
+
+
+class SupplyEmergencyBody(BaseModel):
+    supply_id: int
+    quantity: int
+    operator: str = ""
+    role: str = "supply_manager"       # supply_manager 物资管理员
+    reason: str = ""
+
+
 @router.get("/overview")
 def overview(db: Session = Depends(get_db)):
     res = db.query(Reservoir).all()
@@ -157,7 +197,8 @@ def reservoirs(db: Session = Depends(get_db)):
     return [{"id": r.id, "name": r.name, "node_id": r.node_id,
              "normal_level": r.normal_level, "flood_level": r.flood_level,
              "crest_level": r.crest_level, "current_level": r.current_level,
-             "current_storage": r.current_storage, "gate_max": r.gate_max}
+             "current_storage": r.current_storage, "gate_max": r.gate_max,
+             "storage_curve": r.storage_curve}
             for r in db.query(Reservoir).all()]
 
 
@@ -323,3 +364,50 @@ def resources_confirm(order_id: int, body: ResourceConfirmBody, db: Session = De
     """指挥员确认资源调度令：容量/运力覆盖校验、物资出库、回写转移进度与风险预警。"""
     return resource_svc.confirm_resources(db, order_id, body.operator, body.role,
                                           body.order_text)
+
+
+# ---------------- 枯水期供水保障 ----------------
+@router.get("/supply-plans")
+def supply_plan_list(db: Session = Depends(get_db)):
+    """枯水期供水保障计划单列表（含乡镇明细与应急物资追加记录）。"""
+    return supply_svc.list_plans(db)
+
+
+@router.get("/supply-plans/{plan_id}")
+def supply_plan_detail(plan_id: int, db: Session = Depends(get_db)):
+    return supply_svc.get_plan(db, plan_id)
+
+
+@router.post("/supply-plans")
+def supply_plan_apply(body: SupplyApplyBody, db: Session = Depends(get_db)):
+    """水库管理员提交供水计划（同一水库开口计划单幂等归并）。"""
+    return supply_svc.apply_plan(db, body.reservoir_id, body.operator, body.role,
+                                 body.title, body.period, body.items, body.remark)
+
+
+@router.post("/supply-plans/{plan_id}/review")
+def supply_plan_review(plan_id: int, body: SupplyReviewBody, db: Session = Depends(get_db)):
+    """调度员审核供水计划（复核可供库容）。"""
+    return supply_svc.review_plan(db, plan_id, body.operator, body.role, body.opinion)
+
+
+@router.post("/supply-plans/{plan_id}/execute")
+def supply_plan_execute(plan_id: int, body: SupplyExecuteBody, db: Session = Depends(get_db)):
+    """乡镇联络员确认优先级并启动配水（按优先级×可用库容分配）。"""
+    return supply_svc.execute_plan(db, plan_id, body.operator, body.role,
+                                   body.priorities, body.note)
+
+
+@router.post("/supply-plans/{plan_id}/complete")
+def supply_plan_complete(plan_id: int, body: SupplyCompleteBody, db: Session = Depends(get_db)):
+    """乡镇联络员确认完成：扣减库容，回写水库工况与枯水预警。"""
+    return supply_svc.complete_plan(db, plan_id, body.operator, body.role,
+                                    body.actuals, body.summary)
+
+
+@router.post("/supply-plans/{plan_id}/emergency-supplies")
+def supply_plan_emergency(plan_id: int, body: SupplyEmergencyBody,
+                          db: Session = Depends(get_db)):
+    """物资管理员为异常欠供计划追加应急物资（库存增量出库，幂等）。"""
+    return supply_svc.append_emergency(db, plan_id, body.operator, body.role,
+                                       body.supply_id, body.quantity, body.reason)
